@@ -15,7 +15,7 @@ class AltoRouter {
 	/**
 	 * @var string Can be used to ignore leading part of the Request URL (if main file lives in subdirectory of host)
 	 */
-	protected $basePath = '';
+	public $basePath = '';
 
 	/**
 	 * @var array Array of default match types (regex helpers)
@@ -88,6 +88,19 @@ class AltoRouter {
 	public function addMatchTypes($matchTypes) {
 		$this->matchTypes = array_merge($this->matchTypes, $matchTypes);
 	}
+    
+    public function prefix($prefix = '', $routes = array()){
+        if('' === $prefix){
+            foreach($routes as $route){
+                $this->map($route['route'], $route['target']);
+            }
+        }else{
+            foreach($routes as $route){
+                $this->map($prefix.$route['route'], $route['target']);
+            }
+        }
+        
+    }
 
 	/**
 	 * Map a route to a target
@@ -98,71 +111,15 @@ class AltoRouter {
 	 * @param string $name Optional name of this route. Supply if you want to reverse route this url in your application.
 	 * @throws Exception
 	 */
-	public function map($method, $route, $target, $name = null) {
+	public function map($route, $target, $access = 'public') {
 
-		$this->routes[] = array($method, $route, $target, $name);
+		$this->routes[] = array($route, $target, $access);
 
-		if($name) {
-			if(isset($this->namedRoutes[$name])) {
-				throw new \Exception("Can not redeclare route '{$name}'");
-			} else {
-				$this->namedRoutes[$name] = $route;
-			}
-
-		}
+		$this->namedRoutes[$access][] = $route;
 
 		return;
 	}
-
-	/**
-	 * Reversed routing
-	 *
-	 * Generate the URL for a named route. Replace regexes with supplied parameters
-	 *
-	 * @param string $routeName The name of the route.
-	 * @param array @params Associative array of parameters to replace placeholders with.
-	 * @return string The URL of the route with named parameters in place.
-	 * @throws Exception
-	 */
-	public function generate($routeName, array $params = array()) {
-
-		// Check if named route exists
-		if(!isset($this->namedRoutes[$routeName])) {
-			throw new \Exception("Route '{$routeName}' does not exist.");
-		}
-
-		// Replace named parameters
-		$route = $this->namedRoutes[$routeName];
-		
-		// prepend base path to route url again
-		$url = $this->basePath . $route;
-
-		if (preg_match_all('`(/|\.|)\[([^:\]]*+)(?::([^:\]]*+))?\](\?|)`', $route, $matches, PREG_SET_ORDER)) {
-
-			foreach($matches as $index => $match) {
-				list($block, $pre, $type, $param, $optional) = $match;
-
-				if ($pre) {
-					$block = substr($block, 1);
-				}
-
-				if(isset($params[$param])) {
-					// Part is found, replace for param value
-					$url = str_replace($block, $params[$param], $url);
-				} elseif ($optional && $index !== 0) {
-					// Only strip preceeding slash if it's not at the base
-					$url = str_replace($pre . $block, '', $url);
-				} else {
-					// Strip match block
-					$url = str_replace($block, '', $url);
-				}
-			}
-
-		}
-
-		return $url;
-	}
-
+    
 	/**
 	 * Match a given Request Url against stored routes
 	 * @param string $requestUrl
@@ -174,31 +131,53 @@ class AltoRouter {
 		$params = array();
 		$match = false;
 
-		// set Request Url if it isn't passed as parameter
-		if($requestUrl === null) {
-			$requestUrl = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/';
+		if ( ! isset($_SERVER['REQUEST_URI'], $_SERVER['SCRIPT_NAME']))
+		{
+			return '';
 		}
 
-		// strip base path from request url
-		$requestUrl = substr($requestUrl, strlen($this->basePath));
+		// parse_url() returns false if no host is present, but the path or query string
+		// contains a colon followed by a number
+		$uri = parse_url('http://dummy'.$_SERVER['REQUEST_URI']);
+		$query = isset($uri['query']) ? $uri['query'] : '/';
+		$uri = isset($uri['path']) ? $uri['path'] : '';
+
+		if (isset($_SERVER['SCRIPT_NAME'][0]))
+		{
+			if (strpos($uri, $_SERVER['SCRIPT_NAME']) === 0)
+			{
+				$uri = (string) substr($uri, strlen($_SERVER['SCRIPT_NAME']));
+			}
+			elseif (strpos($uri, dirname($_SERVER['SCRIPT_NAME'])) === 0)
+			{
+				$uri = (string) substr($uri, strlen(dirname($_SERVER['SCRIPT_NAME'])));
+			}
+		}
+
+		// This section ensures that even on servers that require the URI to be in the query string (Nginx) a correct
+		// URI is found, and also fixes the QUERY_STRING server var and $_GET array.
+		if (trim($uri, '/') === '' && strncmp($query, '/', 1) === 0)
+		{
+			$query = explode('?', $query, 2);
+			$uri = $query[0];
+			$_SERVER['QUERY_STRING'] = isset($query[1]) ? $query[1] : '';
+		}
+		else
+		{
+			$_SERVER['QUERY_STRING'] = $query;
+		}
+
+		parse_str($_SERVER['QUERY_STRING'], $_GET);
+		//print_r($query);
+        $requestUrl = $uri.'?'.$query;
 
 		// Strip query string (?a=b) from Request Url
 		if (($strpos = strpos($requestUrl, '?')) !== false) {
 			$requestUrl = substr($requestUrl, 0, $strpos);
 		}
 
-		// set Request Method if it isn't passed as a parameter
-		if($requestMethod === null) {
-			$requestMethod = isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET';
-		}
-
 		foreach($this->routes as $handler) {
-			list($methods, $route, $target, $name) = $handler;
-
-			$method_match = (stripos($methods, $requestMethod) !== false);
-
-			// Method did not match, continue to next route.
-			if (!$method_match) continue;
+			list($route, $target, $name) = $handler;
 
 			if ($route === '*') {
 				// * wildcard (matches all)
@@ -236,6 +215,20 @@ class AltoRouter {
 		}
 		return false;
 	}
+    
+    public function dispatch(){
+        
+        if($matchd = $this->match()){
+            if($class_method = explode('@', $matchd['target'])){
+                $class = new $class_method[0];
+                call_user_func_array(array($class, $class_method[1]), $matchd['params']);
+            }else{
+                call_user_func_array($matchd['target'], $matchd['params']);
+            }
+        }else{
+            echo "404";
+        }
+    }
 
 	/**
 	 * Compile the regex for a given route (EXPENSIVE)
